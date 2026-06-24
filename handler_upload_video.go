@@ -134,6 +134,33 @@ func getVideoAspectRatio(filePath string) (string, error) {
 	return "other", nil
 }
 
+func processVideoForFastStart(filePath string) (string, error) {
+	if len(filePath) < 1 {
+		return "", errors.New("Please provide a file path")
+	}
+
+	outputFilePath := filePath + ".processing"
+
+	cmd := exec.Command("ffmpeg", "-i", filePath, "-c", "copy", "-movflags", "faststart", "-f", "mp4", outputFilePath)
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return "", errors.New(fmt.Sprintf("Error executing ffmpeg command: %s, %v", stderr.String(), err))
+	}
+
+	fileInfo, err := os.Stat(outputFilePath)
+	if err != nil {
+		return "", errors.New(fmt.Sprintf("Error getting stat from processed file: %v", err))
+	}
+	if fileInfo.Size() == 0 {
+		return "", errors.New("Processed file is empty")
+	}
+
+	return outputFilePath, nil
+}
+
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
 	videoIDString := r.PathValue("videoID")
 	videoID, err := uuid.Parse(videoIDString)
@@ -203,7 +230,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 
 	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Error resetting file pointer to beginning of vide file", err)
+		respondWithError(w, http.StatusInternalServerError, "Error resetting file pointer to beginning of video file", err)
 		return
 	}
 
@@ -221,10 +248,24 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		fileName = "other/" + fileName
 	}
 
+	fastStartFileName, err := processVideoForFastStart(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error processing video file for fast start", err)
+		return
+	}
+	defer os.Remove(fastStartFileName)
+
+	fastStartFile, err := os.Open(fastStartFileName)
+	if err  != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error opening fast start video file", err)
+		return
+	}
+	defer fastStartFile.Close()
+
 	if _, err := cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket:      aws.String(cfg.s3Bucket),
 		Key:         aws.String(fileName),
-		Body:        tempFile,
+		Body:        fastStartFile,
 		ContentType: aws.String(mediaType),
 	}); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Error uploading file to S3", err)
